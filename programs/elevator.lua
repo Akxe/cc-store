@@ -1,14 +1,15 @@
---$ARGS|Channel (10)|Floor Number (1)|Floor Name (Unnamed)|Destination Redstone Output (right)|Direction Redstone Output (left)|Moving Redstone Output (front)|Is Host (false)|$ARGS
+--$ARGS|Channel (10)|Floor Number (1)|Floor Name (Unnamed)|Elevator at floor Redstone Intput (bottom white)|Is floor destination Redstone Output (bottom red)|Direction Redstone Output (bottom green)|Moving Redstone Output (bottom blue)|Is Host (false)|$ARGS
 
 -- Args
 local args = { ... }
 local channel = tonumber(args[1]) or 10
 local floorNum = tonumber(args[2]) or 1
 local floorName = args[3] or "Unnamed"
-local destinationRedstoneOutput = args[4] or "right"
-local directionRedstoneOutput = args[5] or "left"
-local movingRedstoneOutput = args[6] or "front"
-local isHost = args[7] == "true"
+local elevatorAtDestinationRedstoneInput = args[4] or "bottom white"
+local destinationRedstoneOutput = args[5] or "bottom red"
+local directionRedstoneOutput = args[6] or "bottom green"
+local movingRedstoneOutput = args[7] or "bottom blue"
+local isHost = args[8] == "true"
 
 -- Libraries
 local setup = require("/lua/lib/setupUtils")
@@ -38,6 +39,9 @@ local direction = 0
 local stateData = stateHandler.getState("elevator")
 local defaultData = 1
 local currentFloorIndex = stateData or defaultData
+
+local destionationFloor = currentFloorIndex;
+local betweenFloors = [];
 
 -- Windows
 local winHeader = setup.setupWindow(
@@ -80,10 +84,10 @@ function start()
         )
     end
 
-    parallel.waitForAny(joinOrCreate, await)
+    parallel.waitForAny(joinOrCreate, awaitFloorSelection)
 end
 
-function await()
+function awaitFloorSelection()
     while(true) do
         local event, p1, p2, p3, p4, p5 = os.pullEvent()
         
@@ -100,8 +104,8 @@ function await()
             if(floor and (floorIndex) ~= currentFloorIndex) then
                 modem.transmit(channel, channel,
                     {
-                         type = "floorChange",
-                         floorIndex = floorIndex   
+                        type = "floorSelected",
+                        floorIndex = floorIndex
                     }
                 )
                 moveTo(floorIndex)
@@ -109,7 +113,7 @@ function await()
             end
         elseif(isModemMessage) then
             local body = p4
-            if(body.type == "floorChange") then
+            if(body.type == "floorSelected") then
                 moveTo(body.floorIndex)
                 break
             end
@@ -120,7 +124,7 @@ end
 function moveTo(floorIndex)
     local floor = floors[floorIndex]
     direction = currentFloorIndex - floorIndex 
-    currentFloorIndex = floorIndex
+    destionationFloor = currentFloorIndex = floorIndex
     moving = true
     updateState()
     
@@ -131,11 +135,18 @@ function moveTo(floorIndex)
         )
     end
     
-    sendSignal(floor.floorNum)
+    setRedstoneSignal(floor.floorNum)
     
     drawMain()
+    parallel.waitForAny(
+        drawMoving,
+        awaitElevatorAtDestionation,
+        function() sleep(120) end
+    )
+    moving = false
+    drawMain()
     
-    sendSignal(floor.floorNum)
+    setRedstoneSignal(floor.floorNum)
     
     if(speaker) then
         speaker.playSound(
@@ -144,20 +155,59 @@ function moveTo(floorIndex)
         )
     end
     
-    await()
+    awaitFloorSelection()
 end
 
-function sendSignal(targetFloorNum)
-    redstone.setOutput(
-        destinationRedstoneOutput, floorNum ~= targetFloorNum
-    )
-    redstone.setOutput(
-        directionRedstoneOutput, direction < 0
-    )
-    redstone.setOutput(
-        movingRedstoneOutput, moving
-    )
+function split(str, sep, plain)
+    if plain then sep = string.gsub(sep, magic, "%%%1") end
     
+    local N = '\255'
+    str = N..str..N
+    str = string.gsub(str, sep, N..N)
+
+    local result = {}
+    for word in string.gmatch(str, N.."(.-)"..N) do
+        if word ~= "" then
+            table.insert(result, word)
+        end
+    end
+    return result
+end
+
+function setRedstoneFor(sideAndColor, output)
+    local side, color = split(sideAndColor, ' ');
+    if color then
+        local combinedColors = redstone.getBundledOutput(side);
+        if output then
+            combinedColors = colors.combine(combinedColors, colors[color]);
+        else
+            combinedColors = colors.substract(combinedColors, colors[color]);
+        end
+        redstone.setBundledOutput(side, output);
+    else
+        redstone.setOutput(side, output);
+    end
+end
+
+function getRedstoneFor(sideAndColor, output)
+    local side, color = split(sideAndColor, ' ');
+    if color then
+        return colors.test(redstone.getBundledOutput(side), colors[color]);
+    else
+        return redstone.getOutput(side);
+    end
+end
+
+function setRedstoneSignal(targetFloorNum)
+    -- is not destination floor
+    setRedstoneFor(destinationRedstoneOutput, floorNum ~= targetFloorNum);
+
+    if(isHost) then
+        -- gearshift
+        setRedstoneFor(directionRedstoneOutput, direction < 0);
+        -- clutch
+        setRedstoneFor(movingRedstoneOutput, moving == false);
+    end
 end
 
 function updateState()
@@ -207,14 +257,7 @@ function drawMain()
         true
     )
     
-    if(moving) then
-        parallel.waitForAny(
-            drawMoving, awaitFinish,
-            function() sleep(120) end
-        )
-        moving = false
-        drawMain()
-    else
+    if(moving == false) then
         drawFloors()
     end
 end
@@ -226,9 +269,9 @@ function drawMoving()
         i = i + 1
         if(i > max) then i = 1 end
         
-        local dirStr = "\\/"
+        local dirStr = "v"
         if(direction > 0) then
-            dirStr = "/\\"
+            dirStr = "^"
         end
         
         winMain.clear()
@@ -256,7 +299,7 @@ function drawMoving()
     end
 end
 
-function awaitFinish()
+function awaitElevatorAtDestionation()
     sleep(1)
     while(true) do
         local event, p1, p2, p3, p4, p5 = os.pullEvent()
@@ -266,16 +309,24 @@ function awaitFinish()
         local isModemMessage = (event == "modem_message")
         
         if(isRedstone) then
+            -- at floor or just left?
+            local atFloor = getRedstoneFor(elevatorAtDestinationRedstoneInput);
             modem.transmit(channel, channel,
                 {
-                    type = "floorChanged"
+                    type = "elevatorInFloor",
+                    floorNum = floorNum,
+                    atFloor = atFloor
                 }
             )
             return
         elseif(isModemMessage) then
             local body = p4
-            if(body.type == "floorChanged") then
-                return
+            if(body.type == "elevatorInFloor") then
+                if(body.floorNum == destionationFloor) then
+                    return
+                end
+
+                -- 
             end
         end
         
